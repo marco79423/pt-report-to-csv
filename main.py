@@ -13,15 +13,20 @@ def main():
     """
 
     # 輸入與輸出檔案路徑
-    portfolio_file = "Portfolio Performance Report.xlsx"
+    portfolio_files = ['Portfolio Performance Report.xlsx', '投資組合績效報告.xlsx']
     csv_file = "portfolio_trades.csv"
     symbol_file = "symbol.csv"
 
     # 檢查檔案是否存在
-    if not Path(portfolio_file).exists():
-        print(f'檔案 {portfolio_file} 不存在')
+    target_portfolio_file = None
+    for portfolio_file in portfolio_files:
+        if Path(portfolio_file).exists():
+            target_portfolio_file = portfolio_file
+            break
+    if not target_portfolio_file:
+        print(f'績效報告檔不存在')
         return
-    print(f'讀取績效報告: {portfolio_file}')
+    print(f'讀取績效報告: {target_portfolio_file}')
 
     if not Path(symbol_file).exists():
         print(f'檔案 {symbol_file} 不存在')
@@ -35,7 +40,7 @@ def main():
         return
 
     # 讀取交易資料
-    df = read_trades_from_excel(portfolio_file)
+    df = read_trades_from_excel(target_portfolio_file)
     if df is None:
         print('績效報告讀取失敗')
         return
@@ -64,12 +69,49 @@ def read_symbol_point_values(symbol_csv_path):
 
 
 def read_trades_from_excel(excel_file_path):
-    try:
-        df = pd.read_excel(excel_file_path, sheet_name='List of Trades', header=2)
-        return df
-    except Exception as e:
-        print(f'Excel 檔讀取失敗: {e}')
-        return None
+    """
+    讀取 Excel 檔案，支援中英文工作表名稱
+    """
+    # 支援的工作表名稱（中英文）
+    sheet_names = ['List of Trades', '交易明細']
+    
+    for sheet_name in sheet_names:
+        try:
+            df = pd.read_excel(excel_file_path, sheet_name=sheet_name, header=2)
+            print(f'成功讀取工作表: {sheet_name}')
+            return df
+        except Exception:
+            continue
+    
+    print(f'Excel 檔讀取失敗: 找不到支援的工作表 {sheet_names}')
+    return None
+
+def normalize_symbol_name(symbol_name):
+    """
+    正規化符號名稱，移除括號及其內容
+    例如: "OSE.NK225M HOT (30 Minutes)" -> "OSE.NK225M HOT"
+    """
+    if not symbol_name:
+        return symbol_name
+    
+    # 找到第一個左括號的位置
+    paren_pos = symbol_name.find('(')
+    if paren_pos != -1:
+        # 移除括號及其後面的內容，並去除尾部空白
+        return symbol_name[:paren_pos].strip()
+    
+    return symbol_name
+
+
+def get_column_value(row, column_mappings):
+    """
+    根據欄位對照表取得欄位值，支援中英文欄位名稱
+    """
+    for column_name in column_mappings:
+        if column_name in row:
+            return row[column_name]
+    return None
+
 
 def process_trading_data(df, symbol_dict):
     """
@@ -80,6 +122,24 @@ def process_trading_data(df, symbol_dict):
     - EntryShort/ExitLong 視為賣出（口數為負）
     - 一大點價值根據 symbol.csv 決定
     """
+    # 欄位對照表（中英文）
+    column_mappings = {
+        'symbol_name': ['Symbol Name', '商品名稱'],
+        'type': ['Type', '類型'],
+        'price': ['Price', '價格'],
+        'date': ['Date', '日期'],
+        'time': ['Time', '時間'],
+        'contracts': ['Contracts', '數量']
+    }
+    
+    # 交易類型對照表（英文對中文）
+    type_mappings = {
+        'EntryLong': '進入Long',
+        'EntryShort': '進入Short',
+        'ExitShort': '離開Long',
+        'ExitLong': '離開Short'
+    }
+    
     results = []
 
     # 兩列為一組（每 2 列一組）進行處理
@@ -91,22 +151,24 @@ def process_trading_data(df, symbol_dict):
         row2 = df.iloc[i + 1]
 
         # 根據商品名稱從 symbol.csv 查詢一大點價值
-        symbol_name = row1['Symbol Name']
+        symbol_name = normalize_symbol_name(get_column_value(row1, column_mappings['symbol_name']))
         point_value = symbol_dict.get(symbol_name, 0)  # 如果找不到商品，預設為 0
 
         # 取得價格資料（仍需要用於輸出）
-        price1 = row1['Price']
-        price2 = row2['Price']
+        price1 = get_column_value(row1, column_mappings['price'])
+        price2 = get_column_value(row2, column_mappings['price'])
 
         # 處理第一筆交易（開倉）
-        date_time = combine_datetime(row1['Date'], row1['Time'])
-        trade_type = row1['Type']
+        date1 = get_column_value(row1, column_mappings['date'])
+        time1 = get_column_value(row1, column_mappings['time'])
+        date_time = combine_datetime(date1, time1)
+        trade_type = get_column_value(row1, column_mappings['type'])
 
         # 判斷買賣別並設定口數正負號
-        if trade_type in ['EntryLong', 'ExitShort']:
-            contracts = abs(row1['Contracts'])  # 買進 = 正
-        else:  # EntryShort, ExitLong
-            contracts = -abs(row1['Contracts'])  # 賣出 = 負
+        if trade_type in ['EntryLong', 'ExitShort', '進入Long', '離開Long']:
+            contracts = abs(get_column_value(row1, column_mappings['contracts']))  # 買進 = 正
+        else:  # EntryShort, ExitLong, 進入Short, 離開Short
+            contracts = -abs(get_column_value(row1, column_mappings['contracts']))  # 賣出 = 負
 
         results.append({
             '商品名稱': symbol_name,
@@ -119,14 +181,16 @@ def process_trading_data(df, symbol_dict):
         # 處理第二筆交易（平倉）
         # 平倉筆「商品名稱」沿用開倉筆，避免出現空白或不同名稱
         symbol_name2 = symbol_name
-        date_time2 = combine_datetime(row2['Date'], row2['Time'])
-        trade_type2 = row2['Type']
+        date2 = get_column_value(row2, column_mappings['date'])
+        time2 = get_column_value(row2, column_mappings['time'])
+        date_time2 = combine_datetime(date2, time2)
+        trade_type2 = get_column_value(row2, column_mappings['type'])
 
         # 判斷買賣別並設定口數正負號
-        if trade_type2 in ['EntryLong', 'ExitShort']:
-            contracts2 = abs(row2['Contracts'])  # 買進 = 正
-        else:  # EntryShort, ExitLong
-            contracts2 = -abs(row2['Contracts'])  # 賣出 = 負
+        if trade_type2 in ['EntryLong', 'ExitShort', '進入Long', '離開Short']:
+            contracts2 = abs(get_column_value(row2, column_mappings['contracts']))  # 買進 = 正
+        else:  # EntryShort, ExitLong, 進入Short, 離開Long
+            contracts2 = -abs(get_column_value(row2, column_mappings['contracts']))  # 賣出 = 負
 
         results.append({
             '商品名稱': symbol_name2,
