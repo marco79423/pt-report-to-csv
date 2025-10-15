@@ -61,7 +61,15 @@ def main():
 def read_symbol_point_values(symbol_csv_path):
     try:
         df = pd.read_csv(symbol_csv_path, encoding='utf-8-sig')
-        symbol_dict = dict(zip(df['商品名稱'], df['一大點價值']))
+        symbol_dict = {}
+        for _, row in df.iterrows():
+            symbol_name = row['商品名稱']
+            point_value = row['一大點價值']
+            fee = row.get('手續費', 0)  # 如果沒有手續費欄位，預設為 0
+            symbol_dict[symbol_name] = {
+                'point_value': point_value,
+                'fee': fee
+            }
         return symbol_dict
     except Exception as e:
         print(f"讀取商品檔失敗: {e}")
@@ -113,6 +121,25 @@ def get_column_value(row, column_mappings):
     return None
 
 
+def calculate_fee(fee_config, price, contracts):
+    """
+    計算手續費
+    fee_config: 手續費設定，可以是固定值或百分比字串
+    price: 成交價格
+    contracts: 成交口數（絕對值）
+    """
+    if fee_config == 0 or not fee_config:
+        return 0
+    
+    # 如果是百分比（含有 % 符號）
+    if isinstance(fee_config, str) and '%' in str(fee_config):
+        percentage = float(str(fee_config).replace('%', ''))
+        return abs(price * contracts * percentage / 100)
+    else:
+        # 固定值
+        return abs(float(fee_config) * contracts)
+
+
 def process_trading_data(df, symbol_dict):
     """
     依需求處理交易資料：
@@ -150,9 +177,11 @@ def process_trading_data(df, symbol_dict):
         row1 = df.iloc[i]
         row2 = df.iloc[i + 1]
 
-        # 根據商品名稱從 symbol.csv 查詢一大點價值
+        # 根據商品名稱從 symbol.csv 查詢一大點價值和手續費
         symbol_name = normalize_symbol_name(get_column_value(row1, column_mappings['symbol_name']))
-        point_value = symbol_dict.get(symbol_name, 0)  # 如果找不到商品，預設為 0
+        symbol_info = symbol_dict.get(symbol_name, {'point_value': 0, 'fee': 0})
+        point_value = symbol_info.get('point_value', 0)
+        fee_config = symbol_info.get('fee', 0)
 
         # 取得價格資料（仍需要用於輸出）
         price1 = get_column_value(row1, column_mappings['price'])
@@ -170,11 +199,15 @@ def process_trading_data(df, symbol_dict):
         else:  # EntryShort, ExitLong, 進入Short, 離開Short
             contracts = -abs(get_column_value(row1, column_mappings['contracts']))  # 賣出 = 負
 
+        # 計算手續費
+        fee = calculate_fee(fee_config, price1, abs(contracts))
+
         results.append({
             '商品名稱': symbol_name,
             '交易時間': date_time,
             '成交價': price1,
             '成交口數': contracts,
+            '手續費': round(fee, 2),
             '一大點價值': round(point_value, 2)
         })
 
@@ -192,11 +225,15 @@ def process_trading_data(df, symbol_dict):
         else:  # EntryShort, ExitLong, 進入Short, 離開Long
             contracts2 = -abs(get_column_value(row2, column_mappings['contracts']))  # 賣出 = 負
 
+        # 計算手續費
+        fee2 = calculate_fee(fee_config, price2, abs(contracts2))
+
         results.append({
             '商品名稱': symbol_name2,
             '交易時間': date_time2,
             '成交價': price2,
             '成交口數': contracts2,
+            '手續費': round(fee2, 2),
             '一大點價值': round(point_value, 2)
         })
 
